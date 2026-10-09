@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('./game.js', import.meta.url), 'utf8');
 function game() {
   const elements = new Map();
-  const drawing = new Proxy({}, { get: () => () => {} });
+  const drawing = new Proxy({}, { get: (_, key) => key === 'createRadialGradient' ? () => ({ addColorStop() {} }) : () => {} });
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
       style: {}, classList: { add() {}, remove() {} },

@@ -9,6 +9,8 @@ let toastTime = 0;
 let soundEnabled = false;
 let audioContext;
 let actionTarget = null;
+let weatherTime = 0;
+const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const elements = Object.fromEntries(['overlay', 'phase', 'clock', 'health-label', 'health-meter', 'suspicion-label', 'suspicion-meter', 'trees-label', 'fines-label', 'council-note', 'toast', 'pause'].map(id => [id, document.getElementById(id)]));
 
 function reset() {
@@ -222,7 +224,7 @@ function updateHud() {
   elements['trees-label'].textContent = state.cutCount;
   elements['fines-label'].innerHTML = `${state.fines} <small>/ 3</small>`;
   elements['council-note'].textContent = state.spotted && state.player.action === 1 ? 'They can see your chainsaw!' : state.suspicion > 65 ? 'They’re getting suspicious. Lay low.' : state.spotted ? 'In council sight. Stay casual.' : 'Nothing to see here, officer.';
-  elements.phase.textContent = state.mode === 'intro' ? 'A QUIET AFTERNOON…' : state.mode === 'paused' ? 'ON A TEA BREAK' : state.mode === 'won' ? 'PROPERTY PROTECTED' : state.mode === 'lost' ? 'A ROUGH AFTERNOON' : state.spotted && state.player.action === 1 ? 'COUNCIL IS WATCHING!' : state.trees.some(tree => tree.status === 'standing' && tree.danger > .75) ? 'WATCH THOSE LEANING TREES' : 'OPERATION: KEEP THE ROOF';
+  elements.phase.textContent = state.mode === 'intro' ? 'A STORM IS ROLLING IN…' : state.mode === 'paused' ? 'ON A TEA BREAK' : state.mode === 'won' ? 'PROPERTY PROTECTED' : state.mode === 'lost' ? 'A ROUGH AFTERNOON' : state.spotted && state.player.action === 1 ? 'COUNCIL IS WATCHING!' : state.trees.some(tree => tree.status === 'standing' && tree.danger > .75) ? 'WATCH THOSE LEANING TREES' : 'OPERATION: KEEP THE ROOF';
 }
 function rectangle(x, y, width, height, color, radius = 0) {
   context.fillStyle = color; context.beginPath(); context.roundRect(x, y, width, height, radius); context.fill();
@@ -236,47 +238,82 @@ function line(x1, y1, x2, y2, color, width = 1) {
 function label(text, x, y, color = '#6a8058', size = 10) {
   context.fillStyle = color; context.font = `600 ${size}px 'DM Sans', sans-serif`; context.textAlign = 'center'; context.fillText(text, x, y);
 }
+function pineCrown(x, y, scale = 1, dangerous = false) {
+  const colors = dangerous ? ['#365b50', '#46705b', '#5b8064'] : ['#244d45', '#326351', '#427960'];
+  for (let tier = 0; tier < 3; tier++) {
+    const width = (35 - tier * 9) * scale;
+    const bottom = y - tier * 19 * scale;
+    const tip = bottom - (45 - tier * 3) * scale;
+    context.fillStyle = colors[tier];
+    context.beginPath();
+    context.moveTo(x, tip);
+    context.lineTo(x + width, bottom);
+    context.lineTo(x + width * .45, bottom - 4 * scale);
+    context.lineTo(x, bottom + 3 * scale);
+    context.lineTo(x - width * .45, bottom - 4 * scale);
+    context.lineTo(x - width, bottom);
+    context.closePath(); context.fill();
+    context.fillStyle = '#102e3340';
+    context.beginPath(); context.moveTo(x, tip); context.lineTo(x + width, bottom);
+    context.lineTo(x, bottom + 3 * scale); context.closePath(); context.fill();
+  }
+}
 function drawYard() {
-  rectangle(0, 0, 960, 640, '#dce5cb');
-  rectangle(0, 568, 960, 72, '#c4c9be');
-  rectangle(0, 583, 960, 57, '#929f94');
-  for (let x = 20; x < 960; x += 110) rectangle(x, 610, 56, 3, '#d8ddcc');
-  rectangle(79, 64, 802, 507, '#becda8', 12);
-  rectangle(130, 117, 700, 420, '#b1c68f', 6);
-  for (let row = 0; row < 10; row++) rectangle(132, 120 + row * 42, 696, 21, '#adc189');
+  rectangle(0, 0, 960, 640, '#243e40');
+  rectangle(0, 568, 960, 72, '#47575a');
+  rectangle(0, 583, 960, 57, '#2d3d43');
+  for (let x = 20; x < 960; x += 110) rectangle(x, 610, 56, 3, '#84928d');
+  rectangle(79, 64, 802, 507, '#38534c', 12);
+  rectangle(130, 117, 700, 420, '#4b6451', 6);
+  for (let row = 0; row < 10; row++) rectangle(132, 120 + row * 42, 696, 21, '#48614e');
   for (let index = 0; index < 170; index++) {
     const x = 147 + (index * 131 % 663); const y = 129 + (index * 83 % 395);
     if (insideHouse(x, y, 15)) continue;
-    line(x, y, x - 2, y - 4, '#95ad76'); line(x, y, x + 3, y - 3, '#95ad76');
+    line(x, y, x - 2, y - 4, '#70816b50'); line(x, y, x + 3, y - 3, '#70816b50');
   }
-  rectangle(453, 400, 56, 165, '#d9d3b6');
-  for (let y = 419; y < 560; y += 24) line(455, y, 506, y, '#c4bfa5', 2);
-  for (let x = 132; x < 832; x += 22) { rectangle(x, 110, 9, 17, '#eee7ce', 2); rectangle(x, 532, 9, 17, '#eee7ce', 2); }
-  line(130, 118, 830, 118, '#d9d5b8', 4); line(130, 540, 445, 540, '#d9d5b8', 4); line(517, 540, 830, 540, '#d9d5b8', 4);
-  for (let y = 126; y < 537; y += 22) { rectangle(122, y, 16, 9, '#eee7ce', 2); rectangle(824, y, 16, 9, '#eee7ce', 2); }
-  line(130, 117, 130, 540, '#d9d5b8', 4); line(832, 117, 832, 540, '#d9d5b8', 4);
+  for (const [x, y, width] of [[310, 210, 25], [683, 322, 34], [331, 460, 29], [574, 505, 18], [777, 459, 23]]) {
+    ellipse(x, y, width, 7, '#78939524');
+    line(x - width * .5, y - 1, x + width * .6, y - 1, '#a2b7aa35');
+    const ripple = (weatherTime * .7 + x) % 1;
+    context.strokeStyle = '#a7c0be35'; context.lineWidth = 1;
+    context.beginPath(); context.ellipse(x + 4, y, 2 + ripple * 11, 1 + ripple * 3, 0, 0, Math.PI * 2); context.stroke();
+  }
+  rectangle(453, 400, 56, 165, '#879083');
+  for (let y = 419; y < 560; y += 24) line(455, y, 506, y, '#657569', 2);
+  for (let x = 132; x < 832; x += 22) { rectangle(x, 110, 9, 17, '#a6af97', 2); rectangle(x, 532, 9, 17, '#a6af97', 2); }
+  line(130, 118, 830, 118, '#839581', 4); line(130, 540, 445, 540, '#839581', 4); line(517, 540, 830, 540, '#839581', 4);
+  for (let y = 126; y < 537; y += 22) { rectangle(122, y, 16, 9, '#a6af97', 2); rectangle(824, y, 16, 9, '#a6af97', 2); }
+  line(130, 117, 130, 540, '#839581', 4); line(832, 117, 832, 540, '#839581', 4);
   rectangle(155, 471, 42, 39, '#9cae7f', 4); rectangle(154, 465, 44, 12, '#708966', 2);
   label('COMPOST', 177, 492, '#dee5cb', 6);
   rectangle(771, 148, 33, 42, '#dec4a1', 3); rectangle(765, 143, 45, 13, '#7d9271', 3); rectangle(785, 167, 10, 23, '#8ba17b', 1);
   rectangle(526, 550, 5, 20, '#748765'); rectangle(517, 544, 24, 14, '#d4ad73', 3); label('42', 529, 555, '#4e6445', 8);
-  for (let index = 0; index < 12; index++) {
-    const x = 155 + index * 59; ellipse(x, 80, 14, 12, '#8fa77b'); ellipse(x - 6, 77, 9, 10, '#a0b58a');
+  for (let index = 0; index < 17; index++) {
+    const x = 65 + index * 53;
+    line(x, 82, x, 57, '#223c36', 5);
+    pineCrown(x, 60 + Math.sin(index * 8) * 7, .65);
   }
-  label('WILLOW LANE', 715, 627, '#d9dfd1', 11);
+  label('WILLOW LANE', 715, 627, '#c0cfc4', 11);
 }
 function drawHouse() {
   rectangle(house.x + 10, house.y + 14, house.width + 8, house.height + 5, '#70865d45', 7);
   rectangle(384, 267, 192, 139, '#e4d6b3', 3);
   rectangle(421, 393, 121, 19, '#e8dcc0', 3);
   rectangle(465, 385, 31, 27, '#7c8c72', 2);
-  rectangle(380, 247, 200, 141, '#bd7860', 4);
-  context.fillStyle = '#cf9072'; context.beginPath(); context.moveTo(377, 247); context.lineTo(479, 217); context.lineTo(584, 247); context.lineTo(479, 315); context.closePath(); context.fill();
-  context.fillStyle = '#aa6656'; context.beginPath(); context.moveTo(479, 315); context.lineTo(584, 247); context.lineTo(584, 387); context.lineTo(479, 399); context.closePath(); context.fill();
+  rectangle(380, 247, 200, 141, '#766e68', 4);
+  context.fillStyle = '#8d8171'; context.beginPath(); context.moveTo(377, 247); context.lineTo(479, 217); context.lineTo(584, 247); context.lineTo(479, 315); context.closePath(); context.fill();
+  context.fillStyle = '#595c5c'; context.beginPath(); context.moveTo(479, 315); context.lineTo(584, 247); context.lineTo(584, 387); context.lineTo(479, 399); context.closePath(); context.fill();
   context.save(); context.beginPath(); context.rect(384, 250, 194, 137); context.clip();
   for (let y = 264; y < 390; y += 14) line(384, y, 578, y + 8, '#8f554931', 1);
   context.restore();
-  line(479, 223, 479, 395, '#e2ad8a', 5);
-  rectangle(413, 268, 28, 24, '#e4d6b4', 2); rectangle(417, 272, 20, 16, '#8caeab', 1); line(427, 272, 427, 288, '#d3ddca', 2);
+  line(479, 223, 479, 395, '#aaa18b', 5);
+  context.save(); context.shadowColor = '#ffcf78'; context.shadowBlur = 18;
+  rectangle(413, 268, 28, 24, '#bcb79a', 2); rectangle(417, 272, 20, 16, '#efc57b', 1);
+  context.restore(); line(427, 272, 427, 288, '#9b815a', 2);
+  const porchLight = context.createRadialGradient(481, 407, 3, 481, 407, 55);
+  porchLight.addColorStop(0, '#f6d88e50'); porchLight.addColorStop(1, '#f6d88e00');
+  context.fillStyle = porchLight; context.fillRect(426, 352, 110, 110);
+  ellipse(481, 406, 3, 3, '#ffe5a2');
   rectangle(534, 255, 21, 32, '#8a7162', 2); rectangle(530, 253, 28, 9, '#d3bea0', 2);
   if (state.health < 100) {
     const count = Math.ceil((100 - state.health) / 20);
@@ -285,27 +322,25 @@ function drawHouse() {
       line(x, y, x + 14, y + 8, '#674f40', 3); line(x + 14, y + 8, x + 6, y + 19, '#674f40', 3); line(x + 6, y + 19, x + 20, y + 30, '#674f40', 3);
     }
   }
-  label('HOME SWEET HOME', 480, 437, '#6b7e53', 8);
+  label('HOME SWEET HOME', 480, 437, '#d1d3b4', 8);
 }
 function drawTree(tree) {
   const { x, y } = tree;
-  ellipse(x + 9, y + 6, tree.status === 'standing' ? 31 : 16, 12, '#617a4c2c');
+  ellipse(x + 15, y + 7, tree.status === 'standing' ? 34 : 16, 12, '#122c3355');
   if (tree.status === 'stump' || tree.status === 'sapling') {
     rectangle(x - 9, y - 5, 18, 13, '#92765a', 3); ellipse(x, y - 5, 10, 5, '#d3af7b'); ellipse(x, y - 5, 5, 2.5, '#b98f60');
-    if (tree.status === 'sapling') { line(x, y - 4, x, y - 27, '#65834b', 3); ellipse(x - 6, y - 21, 8, 4, '#648745'); ellipse(x + 6, y - 29, 8, 5, '#83a555'); }
+    if (tree.status === 'sapling') { line(x, y - 4, x, y - 14, '#8b9568', 3); pineCrown(x, y - 9, .28); }
   } else {
     const dangerous = tree.danger > .65;
     const fallProgress = tree.status === 'falling' ? tree.fall / 1.4 : 0;
     const direction = Math.atan2(325 - y, 480 - x);
     const lean = tree.status === 'falling' ? (Math.hypot(480 - x, 325 - y) - 35) * fallProgress * fallProgress : Math.max(0, tree.danger - .55) * 40;
-    const sway = dangerous ? Math.sin(state.elapsed * 7 + tree.index) * 3 : Math.sin(state.elapsed * 1.4 + tree.index);
+    const wind = Math.sin(weatherTime * .7) * 2 + Math.sin(weatherTime * 2.1 + tree.index) * 2;
+    const sway = dangerous ? Math.sin(state.elapsed * 7 + tree.index) * 3 + wind : wind;
     const topX = x + Math.cos(direction) * lean + sway;
     const topY = y - 33 + Math.sin(direction) * lean;
     line(x, y, topX, topY, '#8b7354', 11); line(x - 2, y, topX - 2, topY, '#ad9265', 3);
-    ellipse(topX + 8, topY - 11, 28, 23, dangerous ? '#7b8748' : '#648445');
-    ellipse(topX - 16, topY - 14, 22, 22, dangerous ? '#99a65d' : '#7d9b52');
-    ellipse(topX + 3, topY - 31, 25, 23, dangerous ? '#a4ad61' : '#8ea85b');
-    ellipse(topX - 7, topY - 29, 16, 17, dangerous ? '#b0b66d' : '#9db86c');
+    pineCrown(topX, topY + 4, 1 + tree.index % 3 * .08, dangerous);
     if (dangerous || tree.status === 'falling') {
       ellipse(topX + 24, topY - 45, 11, 11, tree.danger > .85 ? '#c66f46' : '#dbac59'); label('!', topX + 24, topY - 40, '#fff7db', 15);
       rectangle(x - 20, y + 15, 40, 4, '#78905766', 2); rectangle(x - 20, y + 15, 40 * Math.min(1, tree.danger), 4, '#c1844d', 2);
@@ -315,7 +350,7 @@ function drawTree(tree) {
     context.strokeStyle = '#fff7d6'; context.lineWidth = 2; context.setLineDash([4, 5]); context.beginPath(); context.ellipse(x, y + 1, 24, 13, 0, 0, Math.PI * 2); context.stroke(); context.setLineDash([]);
     const progress = tree.status === 'standing' ? tree.cut : tree.plant;
     if (progress > 0) { rectangle(x - 24, y + 24, 48, 6, '#294b36', 3); rectangle(x - 23, y + 25, 46 * progress, 4, '#efd387', 2); }
-    else if (tree.status !== 'sapling') label(tree.status === 'standing' ? 'HOLD SPACE' : 'HOLD E', x, y + 32, '#425d36', 8);
+    else if (tree.status !== 'sapling') label(tree.status === 'standing' ? 'HOLD SPACE' : 'HOLD E', x, y + 32, '#e6e3bd', 8);
   }
 }
 function drawSight(officer) {
@@ -341,8 +376,34 @@ function drawPerson(person, council = false) {
   else if (person.action === 1) { rectangle(8, -19, 9, 15, '#ce7142', 3); rectangle(10, -32, 5, 17, '#e3dfcb', 2); }
   else if (person.action === 2) { line(10, -4, 13, -24, '#866c4a', 3); ellipse(13, -27, 5, 7, '#b6c0a9'); }
   context.restore();
-  if (council) label('COUNCIL', person.x, person.y + 28, '#496452', 7);
-  else { label('YOU', person.x, person.y + 28, '#425d36', 8); if (keys.has('Shift')) label('sneaking', person.x, person.y + 39, '#708457', 7); }
+  if (council) label('COUNCIL', person.x, person.y + 28, '#cad8c7', 7);
+  else { label('YOU', person.x, person.y + 28, '#f2e6b4', 8); if (keys.has('Shift')) label('sneaking', person.x, person.y + 39, '#c1d0ac', 7); }
+}
+function drawWeather() {
+  const gust = .5 + Math.sin(weatherTime * .45) * .5;
+  // Broad, faint fog banks keep the hazards and sight cones readable.
+  for (let index = 0; index < 5; index++) {
+    const x = ((index * 257 + weatherTime * (9 + index * 2)) % 1400) - 220;
+    const y = 110 + index * 114 + Math.sin(weatherTime * .2 + index) * 18;
+    context.save(); context.translate(x, y); context.scale(2.9, .6);
+    const fog = context.createRadialGradient(0, 0, 5, 0, 0, 100);
+    fog.addColorStop(0, '#c0d7d523'); fog.addColorStop(1, '#c0d7d500');
+    context.fillStyle = fog; context.fillRect(-100, -100, 200, 200); context.restore();
+  }
+  for (let index = 0; index < 135; index++) {
+    const x = ((index * 137 - weatherTime * (80 + gust * 35)) % 1100 + 1100) % 1100 - 70;
+    const y = (index * 79 + weatherTime * (340 + index % 5 * 18)) % 720 - 40;
+    line(x, y, x - 5 - gust * 5, y + 13 + gust * 6, index % 3 === 0 ? '#b4ced33c' : '#9bb9c526', 1);
+  }
+  const vignette = context.createRadialGradient(480, 310, 150, 480, 310, 550);
+  vignette.addColorStop(0, '#081b2b00'); vignette.addColorStop(1, '#081b2b80');
+  context.fillStyle = vignette; context.fillRect(0, 0, 960, 640);
+  const lightningPhase = weatherTime % 23;
+  if (!reducedMotion && lightningPhase > 17 && lightningPhase < 17.8) {
+    const brightness = Math.sin((lightningPhase - 17) / .8 * Math.PI) * .13;
+    context.fillStyle = `rgba(200, 222, 238, ${brightness})`;
+    context.fillRect(0, 0, 960, 640);
+  }
 }
 function draw() {
   context.save();
@@ -355,6 +416,7 @@ function draw() {
   state.officers.forEach(officer => drawPerson(officer, true));
   for (const particle of state.particles) { context.globalAlpha = Math.min(1, particle.life * 2); rectangle(particle.x, particle.y, 4, 4, particle.color, 1); }
   context.globalAlpha = 1;
+  drawWeather();
   context.restore();
 }
 document.getElementById('start').addEventListener('click', start);
@@ -384,6 +446,7 @@ reset();
 function frame(timestamp) {
   const delta = Math.min(.05, (timestamp - lastFrame) / 1000 || 0);
   lastFrame = timestamp;
+  if (!reducedMotion && (state.mode === 'playing' || state.mode === 'intro')) weatherTime += delta;
   update(delta); draw();
   requestAnimationFrame(frame);
 }
