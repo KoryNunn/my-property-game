@@ -2,6 +2,7 @@ const canvas = document.querySelector('#game');
 const context = canvas.getContext('2d');
 const keys = new Set();
 const house = { x: 378, y: 245, width: 204, height: 158 };
+const economy = { startingCash: 200, wagePerSecond: 8, fineCost: 120, repairCost: 60, repairHealth: 20, repairSeconds: 2 };
 const treePositions = [[215, 170], [351, 135], [606, 143], [752, 210], [739, 391], [639, 497], [399, 497], [226, 425], [190, 305], [500, 111], [800, 310], [288, 520]];
 let state;
 let lastFrame = 0;
@@ -11,7 +12,7 @@ let audioContext;
 let actionTarget = null;
 let weatherTime = 0;
 const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-const elements = Object.fromEntries(['overlay', 'phase', 'clock', 'health-label', 'health-meter', 'suspicion-label', 'suspicion-meter', 'trees-label', 'fines-label', 'council-note', 'toast', 'pause'].map(id => [id, document.getElementById(id)]));
+const elements = Object.fromEntries(['overlay', 'phase', 'clock', 'health-label', 'health-meter', 'suspicion-label', 'suspicion-meter', 'trees-label', 'fines-label', 'council-note', 'toast', 'pause', 'cash-label', 'repair-note'].map(id => [id, document.getElementById(id)]));
 
 function reset() {
   keys.clear();
@@ -19,9 +20,10 @@ function reset() {
   elements.toast.classList.remove('visible');
   state = {
     mode: 'intro', elapsed: 0, health: 100, suspicion: 0, fines: 0, cutCount: 0,
+    cash: economy.startingCash, wagesEarned: 0, finesPaid: 0, repairsPaid: 0, repairProgress: 0,
     player: { x: 480, y: 447, facing: -Math.PI / 2, action: 0 },
     trees: treePositions.map(([x, y], index) => ({ x, y, index, status: 'standing', danger: 0, deadline: 20 + index * 2.3, cut: 0, plant: 0, fall: 0, recover: 0 })),
-    officers: [{ x: 110, y: 100, path: 0, facing: 0 }, { x: 850, y: 550, path: 2, facing: Math.PI }],
+    officers: [{ x: 110, y: 100, path: 0, facing: 0, chasing: false, searchTime: 0 }, { x: 850, y: 550, path: 2, facing: Math.PI, chasing: false, searchTime: 0 }],
     particles: [], warning: 0, invulnerability: 0, spotted: false, shake: 0
   };
   updateHud();
@@ -51,11 +53,11 @@ function distance(first, second) { return Math.hypot(first.x - second.x, first.y
 function insideHouse(x, y, margin = 0) {
   return x > house.x - margin && x < house.x + house.width + margin && y > house.y - margin && y < house.y + house.height + margin;
 }
-function lineBlocked(first, second) {
+function lineBlocked(first, second, margin = 0) {
   const steps = Math.ceil(distance(first, second) / 8);
   for (let step = 1; step < steps; step++) {
     const fraction = step / steps;
-    if (insideHouse(first.x + (second.x - first.x) * fraction, first.y + (second.y - first.y) * fraction)) return true;
+    if (insideHouse(first.x + (second.x - first.x) * fraction, first.y + (second.y - first.y) * fraction, margin)) return true;
   }
   return false;
 }
@@ -63,6 +65,74 @@ function canSee(officer, player) {
   const angle = Math.atan2(player.y - officer.y, player.x - officer.x);
   const difference = Math.atan2(Math.sin(angle - officer.facing), Math.cos(angle - officer.facing));
   return distance(officer, player) < 245 && Math.abs(difference) < .65 && !lineBlocked(officer, player);
+}
+function nearHouse(player) {
+  const nearestX = Math.max(house.x, Math.min(house.x + house.width, player.x));
+  const nearestY = Math.max(house.y, Math.min(house.y + house.height, player.y));
+  return Math.hypot(player.x - nearestX, player.y - nearestY) <= 48;
+}
+function councilWaypoint(officer, target) {
+  if (!lineBlocked(officer, target, 14)) return target;
+  // Find the shortest visible route around the four house corners.
+  const points = [officer, target,
+    { x: house.x - 20, y: house.y - 20 }, { x: house.x + house.width + 20, y: house.y - 20 },
+    { x: house.x - 20, y: house.y + house.height + 20 }, { x: house.x + house.width + 20, y: house.y + house.height + 20 }];
+  const distances = points.map(() => Infinity);
+  const previous = points.map(() => -1);
+  const visited = new Set();
+  distances[0] = 0;
+  for (let step = 0; step < points.length; step++) {
+    let current = -1;
+    for (let index = 0; index < points.length; index++) {
+      if (!visited.has(index) && (current === -1 || distances[index] < distances[current])) current = index;
+    }
+    if (current === -1 || !Number.isFinite(distances[current]) || current === 1) break;
+    visited.add(current);
+    for (let index = 0; index < points.length; index++) {
+      if (visited.has(index) || lineBlocked(points[current], points[index], 14)) continue;
+      const candidate = distances[current] + distance(points[current], points[index]);
+      if (candidate < distances[index]) { distances[index] = candidate; previous[index] = current; }
+    }
+  }
+  let next = 1;
+  if (previous[next] === -1) return officer;
+  while (previous[next] !== 0) next = previous[next];
+  return points[next];
+}
+function updateCouncil(delta) {
+  const patrol = [{ x: 110, y: 100 }, { x: 850, y: 100 }, { x: 850, y: 550 }, { x: 110, y: 550 }];
+  for (const officer of state.officers) {
+    if (officer.chasing) {
+      if (canSee(officer, state.player)) {
+        officer.lastKnown = { x: state.player.x, y: state.player.y };
+        officer.searchTime = 0;
+      } else officer.searchTime += delta;
+      if (officer.searchTime >= 5) {
+        officer.chasing = false;
+        if (!state.officers.some(other => other.chasing)) notify('You lost the council. Keep that chainsaw out of sight.');
+      }
+    }
+    const target = officer.chasing ? officer.lastKnown : patrol[(officer.path + 1) % patrol.length];
+    const waypoint = councilWaypoint(officer, target);
+    const remaining = distance(officer, waypoint);
+    if (remaining > .1) {
+      officer.facing = Math.atan2(waypoint.y - officer.y, waypoint.x - officer.x);
+      const travel = Math.min(remaining, (officer.chasing ? 260 : 58 + state.elapsed * .25) * delta);
+      officer.x += (waypoint.x - officer.x) / remaining * travel;
+      officer.y += (waypoint.y - officer.y) / remaining * travel;
+    }
+    if (!officer.chasing && distance(officer, target) < 2) officer.path = (officer.path + 1) % 4;
+    if (officer.chasing && state.invulnerability <= 0 && distance(officer, state.player) <= 24 && !lineBlocked(officer, state.player)) {
+      state.fines++;
+      state.cash -= economy.fineCost;
+      state.finesPaid += economy.fineCost;
+      state.suspicion = 0;
+      state.invulnerability = 6;
+      state.officers.forEach(other => { other.chasing = false; other.searchTime = 0; });
+      notify(`Council caught you! −$${economy.fineCost} fine.${state.cash < 0 ? ' Wages will repay your debt.' : ''}`);
+      tone(780, .3, 'square', .025);
+    }
+  }
 }
 function burst(x, y, color, count = 12) {
   for (let index = 0; index < count; index++) state.particles.push({ x, y, velocityX: (Math.random() - .5) * 110, velocityY: (Math.random() - .5) * 110, life: .7, color });
@@ -73,7 +143,7 @@ function start() {
   elements.overlay.hidden = true;
   elements.pause.innerHTML = 'Ⅱ Pause <kbd>P</kbd>';
   canvas.focus({ preventScroll: true });
-  notify('Get close to a tree and hold SPACE. Watch the yellow sight cones!');
+  notify('Cut trees with SPACE. Dash from council. Hold R beside the house to repair ($60).');
   tone(420, .15);
 }
 function showOverlay(title, description, buttonText, handler) {
@@ -95,8 +165,8 @@ function showOverlay(title, description, buttonText, handler) {
 function finish(won) {
   state.mode = won ? 'won' : 'lost';
   keys.clear();
-  const title = won ? 'Still standing. Just.' : state.health <= 0 ? 'The trees won.' : 'Council says: cease & desist.';
-  showOverlay(title, `${won ? 'You survived the afternoon!' : state.health <= 0 ? 'Your roof had one tree too many.' : 'Three fines. Your chainsaw has been confiscated.'} ${state.cutCount} trees felled · ${state.fines} fines · ${Math.ceil(state.health)}% house remaining.`, 'Another afternoon ↗', start);
+  const title = won ? 'Still standing. Just.' : 'The trees won.';
+  showOverlay(title, `${won ? 'You survived the storm!' : 'Your roof had one tree too many.'} ${state.cutCount} trees felled · $${state.finesPaid} in fines · $${state.repairsPaid} in repairs · $${Math.floor(state.cash)} balance.`, 'Another storm ↗', start);
   tone(won ? 660 : 140, .5, 'triangle');
   updateHud();
 }
@@ -116,33 +186,28 @@ function pause() {
 function update(delta) {
   if (state.mode !== 'playing') return;
   state.elapsed += delta;
+  const wage = economy.wagePerSecond * delta;
+  state.cash += wage;
+  state.wagesEarned += wage;
   state.invulnerability = Math.max(0, state.invulnerability - delta);
   state.shake = Math.max(0, state.shake - delta);
   toastTime -= delta;
   if (toastTime <= 0) elements.toast.classList.remove('visible');
   const player = state.player;
-  const sneaking = keys.has('Shift');
-  const cutting = keys.has(' ');
+  const dashing = keys.has('Shift');
+  const repairing = keys.has('r') && nearHouse(player) && state.health > 0 && state.health < 100 && state.cash >= economy.repairCost;
+  const cutting = keys.has(' ') && !repairing;
   let horizontal = Number(keys.has('d') || keys.has('ArrowRight')) - Number(keys.has('a') || keys.has('ArrowLeft'));
   let vertical = Number(keys.has('s') || keys.has('ArrowDown')) - Number(keys.has('w') || keys.has('ArrowUp'));
   const length = Math.hypot(horizontal, vertical);
   if (length) {
     horizontal /= length; vertical /= length;
     player.facing = Math.atan2(vertical, horizontal);
-    const speed = sneaking ? 100 : 200;
+    const speed = dashing ? 380 : 200;
     const nextX = Math.max(144, Math.min(818, player.x + horizontal * speed * delta));
     const nextY = Math.max(124, Math.min(527, player.y + vertical * speed * delta));
     if (!insideHouse(nextX, player.y, 15)) player.x = nextX;
     if (!insideHouse(player.x, nextY, 15)) player.y = nextY;
-  }
-  const patrol = [{ x: 110, y: 100 }, { x: 850, y: 100 }, { x: 850, y: 550 }, { x: 110, y: 550 }];
-  for (const officer of state.officers) {
-    const target = patrol[(officer.path + 1) % patrol.length];
-    const remaining = distance(officer, target);
-    officer.facing = Math.atan2(target.y - officer.y, target.x - officer.x);
-    const travel = (58 + state.elapsed * .25) * delta;
-    if (remaining <= travel) { officer.x = target.x; officer.y = target.y; officer.path = (officer.path + 1) % 4; }
-    else { officer.x += (target.x - officer.x) / remaining * travel; officer.y += (target.y - officer.y) / remaining * travel; }
   }
   actionTarget = state.trees.filter(tree => tree.status === 'standing' || tree.status === 'stump').sort((a, b) => distance(a, player) - distance(b, player))[0];
   if (!actionTarget || distance(actionTarget, player) > 59) actionTarget = null;
@@ -173,7 +238,7 @@ function update(delta) {
       }
     } else if (tree.status === 'stump') {
       tree.recover -= delta;
-      if (tree === actionTarget && keys.has('e')) {
+      if (tree === actionTarget && keys.has('e') && !repairing) {
         doingPlant = true;
         tree.plant += delta / 1.2;
         if (tree.plant >= 1) {
@@ -192,21 +257,41 @@ function update(delta) {
   const audible = doingCut && state.officers.some(officer => distance(officer, player) < 135 && !lineBlocked(officer, player));
   if (state.invulnerability <= 0) {
     if (doingCut && (state.spotted || audible)) state.suspicion += delta * 43;
-    else if (state.spotted && !sneaking && !doingPlant) state.suspicion += delta * 5;
-    else state.suspicion -= delta * (sneaking ? 9 : 5);
+    else if (state.spotted && !doingPlant) state.suspicion += delta * 5;
+    else state.suspicion -= delta * 5;
   }
   state.suspicion = Math.max(0, Math.min(100, state.suspicion));
-  if (state.suspicion >= 100) {
-    state.fines++; state.suspicion = 35; state.invulnerability = 4;
-    notify(`Caught! Council fine ${state.fines}/3. Hide behind the house.`); tone(780, .3, 'square', .025);
+  if (state.suspicion >= 100 && !state.officers.some(officer => officer.chasing)) {
+    const witnesses = state.officers.filter(officer => canSee(officer, player) || (doingCut && distance(officer, player) < 135 && !lineBlocked(officer, player)));
+    if (witnesses.length) {
+      for (const officer of witnesses) {
+        officer.chasing = true; officer.searchTime = 0;
+        officer.lastKnown = { x: player.x, y: player.y };
+      }
+      notify('Council is coming! Dash away or break their line of sight.');
+      tone(420, .2, 'triangle');
+    }
   }
-  player.action = doingCut ? 1 : doingPlant ? 2 : 0;
+  updateCouncil(delta);
+  if (repairing && nearHouse(player) && state.health > 0 && state.cash >= economy.repairCost && !length) {
+    state.repairProgress += delta / economy.repairSeconds;
+    if (state.repairProgress >= 1) {
+      state.cash -= economy.repairCost;
+      state.repairsPaid += economy.repairCost;
+      state.health = Math.min(100, state.health + economy.repairHealth);
+      state.repairProgress = 0;
+      burst(player.x, player.y, '#e8ca8c');
+      notify(`House repaired! +${economy.repairHealth}% condition, −$${economy.repairCost}.`);
+      tone(560, .15);
+    }
+  } else state.repairProgress = 0;
+  player.action = state.repairProgress > 0 ? 3 : doingCut ? 1 : doingPlant ? 2 : 0;
   state.particles = state.particles.filter(particle => {
     particle.life -= delta; particle.x += particle.velocityX * delta; particle.y += particle.velocityY * delta;
     return particle.life > 0;
   });
   updateHud();
-  if (state.health <= 0 || state.fines >= 3) finish(false);
+  if (state.health <= 0) finish(false);
   else if (state.elapsed >= 90) finish(true);
 }
 function regrow(tree) {
@@ -222,9 +307,13 @@ function updateHud() {
   elements['suspicion-label'].textContent = Math.ceil(state.suspicion) + '%';
   elements['suspicion-meter'].style.width = state.suspicion + '%';
   elements['trees-label'].textContent = state.cutCount;
-  elements['fines-label'].innerHTML = `${state.fines} <small>/ 3</small>`;
-  elements['council-note'].textContent = state.spotted && state.player.action === 1 ? 'They can see your chainsaw!' : state.suspicion > 65 ? 'They’re getting suspicious. Lay low.' : state.spotted ? 'In council sight. Stay casual.' : 'Nothing to see here, officer.';
+  elements['fines-label'].textContent = state.fines;
+  elements['cash-label'].textContent = `${state.cash < 0 ? '−' : ''}$${Math.floor(Math.abs(state.cash))}`;
+  elements['cash-label'].classList.toggle('in-debt', state.cash < 0);
+  elements['repair-note'].textContent = state.health >= 100 ? 'House intact. No repairs needed.' : state.cash < economy.repairCost ? 'Need $60 to repair. Wages keep coming.' : state.repairProgress > 0 ? `Repairing… ${Math.floor(state.repairProgress * 100)}%` : 'Hold R beside the house: $60 → +20%.';
+  elements['council-note'].textContent = state.officers.some(officer => officer.chasing) ? 'Council is chasing you! Dash and hide.' : state.spotted && state.player.action === 1 ? 'They can see your chainsaw!' : state.suspicion > 65 ? 'They’re getting suspicious. Lay low.' : state.spotted ? 'In council sight. Stay casual.' : 'Nothing to see here, officer.';
   elements.phase.textContent = state.mode === 'intro' ? 'A STORM IS ROLLING IN…' : state.mode === 'paused' ? 'ON A TEA BREAK' : state.mode === 'won' ? 'PROPERTY PROTECTED' : state.mode === 'lost' ? 'A ROUGH AFTERNOON' : state.spotted && state.player.action === 1 ? 'COUNCIL IS WATCHING!' : state.trees.some(tree => tree.status === 'standing' && tree.danger > .75) ? 'WATCH THOSE LEANING TREES' : 'OPERATION: KEEP THE ROOF';
+  if (state.mode === 'playing' && state.officers.some(officer => officer.chasing)) elements.phase.textContent = 'COUNCIL IN PURSUIT — RUN!';
 }
 function rectangle(x, y, width, height, color, radius = 0) {
   context.fillStyle = color; context.beginPath(); context.roundRect(x, y, width, height, radius); context.fill();
@@ -343,15 +432,25 @@ function drawTree(tree) {
     pineCrown(topX, topY + 4, 1 + tree.index % 3 * .08, dangerous);
     if (dangerous || tree.status === 'falling') {
       ellipse(topX + 24, topY - 45, 11, 11, tree.danger > .85 ? '#c66f46' : '#dbac59'); label('!', topX + 24, topY - 40, '#fff7db', 15);
-      rectangle(x - 20, y + 15, 40, 4, '#78905766', 2); rectangle(x - 20, y + 15, 40 * Math.min(1, tree.danger), 4, '#c1844d', 2);
     }
   }
   if (tree === actionTarget && state.mode === 'playing') {
     context.strokeStyle = '#fff7d6'; context.lineWidth = 2; context.setLineDash([4, 5]); context.beginPath(); context.ellipse(x, y + 1, 24, 13, 0, 0, Math.PI * 2); context.stroke(); context.setLineDash([]);
     const progress = tree.status === 'standing' ? tree.cut : tree.plant;
-    if (progress > 0) { rectangle(x - 24, y + 24, 48, 6, '#294b36', 3); rectangle(x - 23, y + 25, 46 * progress, 4, '#efd387', 2); }
-    else if (tree.status !== 'sapling') label(tree.status === 'standing' ? 'HOLD SPACE' : 'HOLD E', x, y + 32, '#e6e3bd', 8);
+    const actionY = tree.status === 'standing' ? y + 43 : y + 24;
+    if (progress > 0) { rectangle(x - 24, actionY, 48, 6, '#294b36', 3); rectangle(x - 23, actionY + 1, 46 * progress, 4, '#efd387', 2); }
+    else if (tree.status !== 'sapling') label(tree.status === 'standing' ? 'HOLD SPACE' : 'HOLD E', x, actionY + 8, '#e6e3bd', 8);
   }
+}
+function drawTreeCountdown(tree) {
+  if (tree.status !== 'standing' && tree.status !== 'falling') return;
+  const remainingFraction = Math.max(0, 1 - tree.danger);
+  const remainingSeconds = Math.max(0, tree.deadline * remainingFraction);
+  const color = remainingSeconds <= 5 ? '#ed8668' : remainingSeconds <= 10 ? '#e7bd6e' : '#accd9a';
+  rectangle(tree.x - 27, tree.y + 12, 54, 26, '#142d32e6', 4);
+  rectangle(tree.x - 23, tree.y + 16, 46, 5, '#566962', 2);
+  rectangle(tree.x - 23, tree.y + 16, 46 * remainingFraction, 5, color, 2);
+  label(tree.status === 'falling' ? 'FALLING!' : `${Math.ceil(remainingSeconds)}s`, tree.x, tree.y + 33, color, 10);
 }
 function drawSight(officer) {
   context.beginPath(); context.moveTo(officer.x, officer.y);
@@ -362,7 +461,7 @@ function drawSight(officer) {
     }
     context.lineTo(officer.x + Math.cos(angle) * radius, officer.y + Math.sin(angle) * radius);
   }
-  context.closePath(); context.fillStyle = state.spotted && state.player.action === 1 ? '#df915a35' : '#f9dc7438'; context.fill();
+  context.closePath(); context.fillStyle = officer.chasing ? '#e4785c40' : state.spotted && state.player.action === 1 ? '#df915a35' : '#f9dc7438'; context.fill();
 }
 function drawPerson(person, council = false) {
   ellipse(person.x + 3, person.y + 5, 11, 6, '#435b432f');
@@ -375,9 +474,13 @@ function drawPerson(person, council = false) {
   if (council) { rectangle(8, -8, 10, 13, '#d8dbc8', 1); rectangle(10, -6, 6, 2, '#8a9580'); }
   else if (person.action === 1) { rectangle(8, -19, 9, 15, '#ce7142', 3); rectangle(10, -32, 5, 17, '#e3dfcb', 2); }
   else if (person.action === 2) { line(10, -4, 13, -24, '#866c4a', 3); ellipse(13, -27, 5, 7, '#b6c0a9'); }
+  else if (person.action === 3) { line(10, -3, 10, -24, '#ab8a59', 3); rectangle(4, -27, 14, 6, '#d2d7c6', 2); }
   context.restore();
-  if (council) label('COUNCIL', person.x, person.y + 28, '#cad8c7', 7);
-  else { label('YOU', person.x, person.y + 28, '#f2e6b4', 8); if (keys.has('Shift')) label('sneaking', person.x, person.y + 39, '#c1d0ac', 7); }
+  if (council) {
+    label(person.chasing ? 'STOP! COUNCIL' : 'COUNCIL', person.x, person.y + 28, person.chasing ? '#ffd3aa' : '#cad8c7', 7);
+    if (person.chasing) { ellipse(person.x, person.y - 27, 9, 9, '#c97251'); label('!', person.x, person.y - 23, '#fff5d7', 12); }
+  }
+  else { label('YOU', person.x, person.y + 28, '#f2e6b4', 8); if (walking && keys.has('Shift')) label('dashing', person.x, person.y + 39, '#c1d0ac', 7); }
 }
 function drawWeather() {
   const gust = .5 + Math.sin(weatherTime * .45) * .5;
@@ -417,6 +520,15 @@ function draw() {
   for (const particle of state.particles) { context.globalAlpha = Math.min(1, particle.life * 2); rectangle(particle.x, particle.y, 4, 4, particle.color, 1); }
   context.globalAlpha = 1;
   drawWeather();
+  // Draw countdowns above the scene so foliage and fog cannot hide them.
+  state.trees.forEach(drawTreeCountdown);
+  if (state.health < 100 && state.mode === 'playing') {
+    rectangle(423, 324, 114, 39, '#142d32e6', 5);
+    label(`HOUSE ${Math.ceil(state.health)}%`, 480, 337, '#ead5ab', 9);
+    rectangle(433, 342, 94, 4, '#52645a', 2);
+    rectangle(433, 342, 94 * state.health / 100, 4, state.health <= 40 ? '#ed8668' : '#accd9a', 2);
+    label(state.repairProgress > 0 ? `REPAIR ${Math.floor(state.repairProgress * 100)}%` : nearHouse(state.player) ? state.cash >= economy.repairCost ? 'HOLD R · $60' : 'NEED $60' : 'REPAIR BESIDE HOUSE', 480, 358, '#c6d0b6', 8);
+  }
   context.restore();
 }
 document.getElementById('start').addEventListener('click', start);
@@ -430,7 +542,7 @@ document.getElementById('sound').addEventListener('click', event => {
 window.addEventListener('keydown', event => {
   if (event.target instanceof HTMLButtonElement && (event.key === ' ' || event.key === 'Enter')) return;
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Shift', 'w', 'a', 's', 'd', 'e', 'p'].includes(key)) {
+  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Shift', 'w', 'a', 's', 'd', 'e', 'r', 'p'].includes(key)) {
     if (state.mode === 'playing' || state.mode === 'paused') event.preventDefault();
     if (key === 'p' && !event.repeat) pause(); else keys.add(key);
   }
