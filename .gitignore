@@ -1,0 +1,22 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+.cache/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.aws/
+
+# Logs
+*.log
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
